@@ -1,6 +1,7 @@
 import time
 import os
 
+import numpy as np
 import torch
 from torch.autograd import Variable
 import torch.nn as nn
@@ -20,23 +21,37 @@ from utils import postp
 def load_images(image_dir=None):
     """
     1) Load each image in img_paths. Use Image in the PIL library.
-    2) Apply the prep transformation to each image (see the variables above)
+    2) Apply the transformation to each image
     3) Convert each image from size C x W x H to 1 x C x W x H (same as batch size 1)
     4) Wrap each Tensor in a Variable
     5) Return a tuple of (style_image_tensor, content_image_tensor)
     """
     image_dir = image_dir or utils.image_dir
     img_paths = [image_dir + 'vangogh_starry_night.jpg', image_dir + 'Tuebingen_Neckarfront.jpg']
-
-    raise NotImplementedError
-
+    
+    img_starry_night = Image.open(img_paths[0])
+    img_neckarfront = Image.open(img_paths[1])
+    
+    
+    
+    img_starry_night = utils.prep(img_starry_night)
+    img_neckarfront = utils.prep(img_neckarfront)
+    
+    img_starry_night.unsqueeze_(0)
+    img_neckarfront.unsqueeze_(0)
+    
+    style_image_tensor = Variable(img_starry_night, requires_grad = False)
+    content_image_tensor = Variable(img_neckarfront, requires_grad = False)
+    
+    return style_image_tensor, content_image_tensor
+    
 
 def generate_pastiche(content_image):
     """
     Clone the content_image and return wrapped as a Variable with
     requires_grad=True
     """
-    raise NotImplementedError
+    return Variable(content_image.data.clone(), requires_grad = True)
 
 
 class ContentLoss(nn.Module):
@@ -49,16 +64,18 @@ class ContentLoss(nn.Module):
         """
         super(ContentLoss, self).__init__()
 
-        raise NotImplementedError
-
+        self.loss = nn.MSELoss()
+        self.target= target
+        self.weight = weight
+        
     def forward(self, x):
         """ Calculate the content loss. Refer to the notebook for the formula.
 
         Keyword arguments:
         x -- a selected output layer of feeding the pastiche through the cnn
         """
-        raise NotImplementedError
-
+        output = self.weight * self.loss(x, self.target)
+        return output
 
 class GramMatrix(nn.Module):
     def forward(self, x):
@@ -68,9 +85,10 @@ class GramMatrix(nn.Module):
 
         Keyword arguments:
         x - a B x C x W x H sized tensor, it should be resized to B x C x W*H
+               0 1 2 3 --> 0 1 3 2
         """
-
-        raise NotImplementedError
+        flattened = x.view(x.shape[0], x.shape[1], x.shape[2] * x.shape[3])
+        return torch.bmm(flattened, flattened.permute(0,2,1)) / (x.shape[2] * x.shape[3])
 
 
 class StyleLoss(nn.Module):
@@ -82,8 +100,10 @@ class StyleLoss(nn.Module):
         weight - the weight applied to this loss (refer to the formula)
         """
         super(StyleLoss, self).__init__()
-
-        raise NotImplementedError
+        self.target = target
+        self.weight = weight
+        self.gram = GramMatrix()
+        self.loss = nn.MSELoss()
 
 
     def forward(self, x):
@@ -94,7 +114,8 @@ class StyleLoss(nn.Module):
         Keyword arguments:
         x - features of an arbitrary cnn layer by feeding the pastiche
         """
-        raise NotImplementedError
+        output = self.weight * self.loss(self.gram(x), self.target)
+        return output
 
 
 def construct_style_loss_fns(vgg_model, style_image, style_layers):
@@ -108,7 +129,14 @@ def construct_style_loss_fns(vgg_model, style_image, style_layers):
     style_layers - a list of layers of the cnn output we want.
 
     """
-    raise NotImplementedError
+    
+    trained = vgg_model(style_image, style_layers)
+    n = [64, 128, 256, 512, 512]
+    result = []
+    for i in range(0,5):
+        result.append(StyleLoss(GramMatrix()(trained[i]).detach(), 1000/(n[i]*n[i])))
+    return result
+        
 
 
 def construct_content_loss_fns(vgg_model, content_image, content_layers):
@@ -122,7 +150,13 @@ def construct_content_loss_fns(vgg_model, content_image, content_layers):
     content_layers - a list of layers of the cnn output we want.
 
     """
-    raise NotImplementedError
+    
+    trained = vgg_model(content_image, content_layers)
+    n = [512]
+    result = []
+    for i in range(0,1):
+        result.append(ContentLoss(trained[i].detach(), 1))
+    return result
 
 
 def main():
@@ -134,20 +168,35 @@ def main():
 
     # Load up all of the style, content, and pastiche Image
     # Construct the loss functions
-    raise NotImplementedError
+    vgg_model = utils.load_vgg()
+    style_image, content_image = load_images()
+    pastiche = generate_pastiche(content_image)
 
+    style_layers = ['r11','r21','r31','r41', 'r51'] 
+    content_layers = ['r42']
+    loss_layers = style_layers + content_layers
+
+    style_loss_fns = construct_style_loss_fns(vgg_model, style_image, style_layers) 
+    content_loss_fns = construct_content_loss_fns(vgg_model, content_image, content_layers)    
+    loss_fns = style_loss_fns + content_loss_fns
+
+    max_iter, show_iter = 20, 2
     optimizer = optim.LBFGS([pastiche])
-
-    for itr in range(max_iter):
-        def closure():
-
-            # Implement the optimization step
-            raise NotImplementedError
-
-            if itr % show_iter == 0:
-                print('Iteration: %d, loss: %f' % (itr, loss.data[0]))
-            return loss
-        optimizer.step(closure)
+    n_iter = [0]
+    print("entering for loop")
+    #while n_iter[0] <= max_iter:
+    def closure():
+        # Implement the optimization step
+        optimizer.zero_grad()
+        output = vgg_model(pastiche, loss_layers)
+        curr_loss = [los(out) for los, out in zip(loss_fns, output)]
+        loss = sum(curr_loss)
+        loss.backward()
+        n_iter[0] += 1
+        if n_iter[0] % show_iter == 0:
+            print('Iteration: %d, loss: %f' % (n_iter[0], loss.data[0]))
+        return loss
+    optimizer.step(closure)
 
     out_img = postp(pastiche.data[0].cpu().squeeze())
     plt.imshow(out_img)
@@ -156,5 +205,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
